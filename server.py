@@ -1,61 +1,112 @@
-from flask import Flask, request, render_template_string
-import json
+from flask import Flask, request, render_template_string, redirect, session
+import sqlite3
 import os
 import time
 import random
 import string
 
 app = Flask(__name__)
+app.secret_key = "SLASH_SECRET_123"
 
-# ================= LOAD / SAVE KEYS =================
-def load_keys():
-    global KEYS
-    try:
-        with open("keys.json", "r") as f:
-            KEYS = json.load(f)
-    except:
-        KEYS = {}
+# ================= DATABASE =================
+def db():
+    return sqlite3.connect("keys.db")
 
-def save_keys():
-    with open("keys.json", "w") as f:
-        json.dump(KEYS, f, indent=4)
+def init_db():
+    conn = db()
+    c = conn.cursor()
 
-# ================= EXPIRE CHECK (24h) =================
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS keys (
+        key TEXT PRIMARY KEY,
+        hwid TEXT,
+        start_time REAL,
+        status TEXT
+    )
+    """)
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS admin (
+        id INTEGER PRIMARY KEY,
+        password TEXT
+    )
+    """)
+
+    c.execute("INSERT OR IGNORE INTO admin VALUES (1,'SLASH_ADMIN')")
+
+    conn.commit()
+    conn.close()
+
+def get_keys():
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM keys")
+    rows = c.fetchall()
+    conn.close()
+
+    return {
+        r[0]: {
+            "hwid": r[1],
+            "start_time": r[2],
+            "status": r[3]
+        } for r in rows
+    }
+
+def add_key(key):
+    conn = db()
+    c = conn.cursor()
+    c.execute("INSERT INTO keys VALUES (?,?,?,?)",
+              (key, None, None, "active"))
+    conn.commit()
+    conn.close()
+
+def delete_key_db(key):
+    conn = db()
+    c = conn.cursor()
+    c.execute("DELETE FROM keys WHERE key=?", (key,))
+    conn.commit()
+    conn.close()
+
+# ================= EXPIRY (NOT TOUCH LOGIC) =================
 def is_expired(start_time):
     if start_time is None:
         return False
     return (time.time() - start_time) > 86400
 
 # ================= ADMIN =================
-ADMIN_PASS = "SLASH_ADMIN"
+def login_required():
+    return session.get("admin") == True
 
+# ================= KEY GEN =================
 def gen_key():
     return "SLASH-" + "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
 
-# ================= DASHBOARD UI =================
+# ================= UI =================
 DASH = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Key Dashboard</title>
+<title>CYBER PANEL</title>
 <meta http-equiv="refresh" content="3">
 <style>
-body { background:#111; color:white; font-family:Arial; }
+body { background:#0d0d0d; color:#00ffcc; font-family:monospace; }
 table { width:100%; border-collapse:collapse; }
-th,td { border:1px solid #333; padding:8px; text-align:center; }
-th { background:#6c5ce7; }
-button { padding:5px; cursor:pointer; }
-.copy { background:green; color:white; border:none; }
-.del { background:red; color:white; border:none; }
+th,td { border:1px solid #00ffcc33; padding:8px; }
+th { background:#111; }
+button { background:#00ffcc; border:none; padding:5px; cursor:pointer; }
+.del { background:red; color:white; }
+.glow { text-shadow:0 0 10px #00ffcc; }
 </style>
 </head>
 <body>
 
-<h2>🔑 KEY DASHBOARD</h2>
+<h2 class="glow">⚡ CYBER KEY PANEL</h2>
 
-<form action="/generate" method="get">
-<input type="password" name="pass" placeholder="admin pass">
-<button>GENERATE KEY</button>
+<a href="/logout">LOGOUT</a>
+
+<form action="/generate">
+<input name="amount" value="1">
+<button>GEN</button>
 </form>
 
 <table>
@@ -69,10 +120,10 @@ button { padding:5px; cursor:pointer; }
 {% for k,v in KEYS.items() %}
 <tr>
 <td>{{k}}</td>
-<td>{{v.get("hwid")}}</td>
-<td>{{v.get("start_time")}}</td>
+<td>{{v["hwid"]}}</td>
+<td>{{v["start_time"]}}</td>
 <td>
-<button class="copy" onclick="copyKey('{{k}}')">COPY</button>
+<button onclick="navigator.clipboard.writeText('{{k}}')">COPY</button>
 <a href="/delete?key={{k}}"><button class="del">DEL</button></a>
 </td>
 </tr>
@@ -80,56 +131,78 @@ button { padding:5px; cursor:pointer; }
 
 </table>
 
-<script>
-function copyKey(k){
-    navigator.clipboard.writeText(k);
-    alert("Copied: " + k);
-}
-</script>
-
 </body>
 </html>
 """
 
+LOGIN = """
+<form method="post">
+<input name="password" placeholder="admin">
+<button>LOGIN</button>
+</form>
+"""
+
 # ================= ROUTES =================
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "POST":
+        pw = request.form["password"]
+
+        conn = db()
+        c = conn.cursor()
+        c.execute("SELECT password FROM admin WHERE id=1")
+        real = c.fetchone()[0]
+        conn.close()
+
+        if pw == real:
+            session["admin"] = True
+            return redirect("/dashboard")
+
+        return "wrong"
+
+    return LOGIN
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
 @app.route("/")
 def home():
     return "Key Server Running"
 
-# ---------------- DASHBOARD ----------------
 @app.route("/dashboard")
 def dashboard():
-    return render_template_string(DASH, KEYS=KEYS)
+    if not login_required():
+        return redirect("/login")
 
-# ---------------- GENERATE KEY ----------------
+    return render_template_string(DASH, KEYS=get_keys())
+
 @app.route("/generate")
 def generate():
-    if request.args.get("pass") != ADMIN_PASS:
-        return "unauthorized"
+    if not login_required():
+        return "no access"
 
-    key = gen_key()
+    amount = int(request.args.get("amount",1))
 
-    KEYS[key] = {
-        "hwid": None,
-        "start_time": None,
-        "status": "active"
-    }
+    keys = []
+    for _ in range(amount):
+        k = gen_key()
+        add_key(k)
+        keys.append(k)
 
-    save_keys()
-    return f"generated: {key}"
+    return "<br>".join(keys)
 
-# ---------------- DELETE KEY ----------------
 @app.route("/delete")
 def delete():
+    if not login_required():
+        return "no access"
+
     key = request.args.get("key")
+    delete_key_db(key)
+    return redirect("/dashboard")
 
-    if key in KEYS:
-        del KEYS[key]
-        save_keys()
-
-    return "deleted"
-
-# ================= YOUR ORIGINAL LOGIC (UNCHANGED) =================
+# ================= ORIGINAL LOGIC (UNCHANGED) =================
 @app.route("/check")
 def check():
     key = request.args.get("key")
@@ -138,31 +211,40 @@ def check():
     if not key or not hwid:
         return "invalid"
 
-    if key not in KEYS:
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM keys WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
         return "invalid"
 
-    data = KEYS[key]
+    data = {
+        "hwid": row[1],
+        "start_time": row[2],
+        "status": row[3]
+    }
 
-    # 🔥 bind ครั้งแรก
-    if data.get("hwid") is None:
-        data["hwid"] = hwid
-        data["start_time"] = time.time()
-        save_keys()
+    if data["hwid"] is None:
+        conn = db()
+        c = conn.cursor()
+        c.execute("UPDATE keys SET hwid=?, start_time=? WHERE key=?",
+                  (hwid, time.time(), key))
+        conn.commit()
+        conn.close()
         return "binded"
 
-    # ❌ คนละเครื่อง
     if data["hwid"] != hwid:
         return "hwid_error"
 
-    # 🔥 หมดอายุ 1 วัน
     if is_expired(data["start_time"]):
         return "expired"
 
     return "ok"
 
 # ================= START =================
-load_keys()
+init_db()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
