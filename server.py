@@ -86,7 +86,7 @@ DASH = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>CYBER PANEL</title>
+<title>slash - dashbroad</title>
 <meta http-equiv="refresh" content="3">
 <style>
 body { background:#0d0d0d; color:#00ffcc; font-family:monospace; }
